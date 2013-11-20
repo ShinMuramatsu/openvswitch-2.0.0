@@ -1,0 +1,5 @@
+*.o
+
+config.*
+.deps/
+stamp-h1
