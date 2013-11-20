@@ -26,6 +26,11 @@
 #include <linux/skbuff.h>
 #include <linux/u64_stats_sync.h>
 
+/* tunnel thread */
+#include <linux/completion.h>
+#include <linux/sched.h>
+#include <linux/spinlock.h>
+
 #include "compat.h"
 #include "flow.h"
 #include "vlan.h"
@@ -188,6 +193,28 @@ struct sk_buff *ovs_vport_cmd_build_info(struct vport *, u32 portid, u32 seq,
 
 int ovs_execute_actions(struct datapath *dp, struct sk_buff *skb);
 void ovs_dp_notify_wq(struct work_struct *work);
+
+/* used tunnel thread */
+struct tnl_send_elements{
+  struct sk_buff *sk;
+  struct vport *vp;
+};
+
+/* skb_queue size */
+#define SK_BUFFSIZE 4096
+
+/* tunnel skb and vport pointer */
+struct sk_vp_queue{
+  struct tnl_send_elements *q;
+  spinlock_t lock;
+  int q_len;
+};
+
+/* tunnel task num and end flag*/
+#define TASK_NUM 1
+
+void tnl_enqueue(struct sk_buff *skb, struct vport *vport);
+int tnl_dequeue(struct tnl_send_elements *sk_vp);
 
 #define OVS_NLERR(fmt, ...) \
 	pr_info_once("netlink: " fmt, ##__VA_ARGS__)

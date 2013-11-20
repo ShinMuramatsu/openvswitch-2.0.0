@@ -39,6 +39,7 @@
 #include <linux/version.h>
 #include <linux/ethtool.h>
 #include <linux/wait.h>
+#include <linux/completion.h>
 #include <asm/div64.h>
 #include <linux/highmem.h>
 #include <linux/netfilter_bridge.h>
@@ -2401,14 +2402,111 @@ static struct pernet_operations ovs_net_ops = {
 
 DEFINE_COMPAT_PNET_REG_FUNC(device);
 
+static struct task_struct *tnl_task[TASK_NUM];
+bool end_flag;
+struct sk_vp_queue sv;
+struct completion nr_comp;
+
+void tnl_enqueue(struct sk_buff *skb, struct vport *vport)
+{
+  spin_lock(&sv.lock);
+
+  /* enqueue skb and vport pointer */
+  sv.q[sv.q_len].sk = skb;
+  sv.q[sv.q_len].vp = vport;
+  sv.q_len++;
+
+  /* if qeueu len is 1, wake up tunnel thread */
+  if(sv.q_len == 1)
+    complete(&nr_comp);
+
+  spin_unlock(&sv.lock);
+}
+
+int tnl_dequeue(struct tnl_send_elements *sk_vp)
+{
+  int q_len;
+
+  spin_lock(&sv.lock);
+
+  /* dequeue skb and vport pointer */
+  q_len = sv.q_len;
+  sv.q_len = 0;
+  memcpy(sk_vp, sv.q, sizeof(struct tnl_send_elements) * q_len);
+
+  spin_unlock(&sv.lock);
+  return q_len;
+}
+
+static int tnl_thread(void *dummy)
+{
+  struct tnl_send_elements *sk_vp;
+  int q_len;
+  int i;
+
+  printk("success creating thread\n");
+  sk_vp = kmalloc(sizeof(struct tnl_send_elements) * SK_BUFFSIZE, GFP_KERNEL);
+  if(!sk_vp){
+    return PTR_ERR(sk_vp);
+  }
+
+  for(;;)
+    {
+      wait_for_completion(&nr_comp);
+      if(end_flag == true)
+	break;
+ 
+      q_len = tnl_dequeue(sk_vp);
+
+      for(i = 0; i < q_len; i++){
+	ovs_vport_send(sk_vp[i].vp, sk_vp[i].sk);
+      }
+    }
+
+  kfree(sk_vp);
+  printk("end tunnel thread\n");
+  return 0;
+}
+
+static void init_tnl_task(void)
+{
+  sv.q = kmalloc(sizeof(struct tnl_send_elements) * SK_BUFFSIZE, GFP_KERNEL);
+  if(!sv.q){
+    return;
+  }
+  init_completion(&nr_comp);
+  spin_lock_init(&sv.lock);
+  end_flag = false;
+}
+
+static void cleanup_thread(void)
+{
+  int i;
+
+  end_flag = true;
+
+  for(i = 0; i < TASK_NUM; i++){
+    complete(&nr_comp);
+  }
+}
+
 static int __init dp_init(void)
 {
 	int err;
+	int i;
 
 	BUILD_BUG_ON(sizeof(struct ovs_skb_cb) > FIELD_SIZEOF(struct sk_buff, cb));
 
 	pr_info("Open vSwitch switching datapath %s, built "__DATE__" "__TIME__"\n",
 		VERSION);
+
+	/* init and run tunnel thread */
+	init_tnl_task();
+	for(i = 0; i < TASK_NUM; i++){
+	  tnl_task[i] = kthread_run(tnl_thread, NULL, "tnl_thread");
+	  if(IS_ERR(tnl_task[i]))
+	    return PTR_ERR(tnl_task[i]);
+	}
 
 	err = ovs_workqueues_init();
 	if (err)
@@ -2462,6 +2560,7 @@ static void dp_cleanup(void)
 	ovs_vport_exit();
 	ovs_flow_exit();
 	ovs_workqueues_exit();
+	cleanup_thread();
 }
 
 module_init(dp_init);

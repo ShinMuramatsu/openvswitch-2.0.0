@@ -401,7 +401,10 @@ static int do_output(struct datapath *dp, struct sk_buff *skb, int out_port)
 		return -ENODEV;
 	}
 
-	ovs_vport_send(vport, skb);
+	if((vport->ops->type == OVS_VPORT_TYPE_VXLAN) || (vport->ops->type == OVS_VPORT_TYPE_GRE))
+	  tnl_enqueue(skb,vport);
+	else
+	  ovs_vport_send(vport, skb);
 	return 0;
 }
 
